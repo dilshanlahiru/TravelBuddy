@@ -65,6 +65,9 @@
     <string name="floating_ptt_description">Hold to talk. Drag to move.</string>
     <string name="floating_ptt_permission_denied">Allow Travel Buddy to display over other apps to use floating push-to-talk.</string>
     <string name="floating_ptt_failed">The floating push-to-talk button could not be shown.</string>
+    <string name="background_comms_failed">Android could not enable reliable screen-off communication.</string>
+    <string name="telecom_registration_failed">Android call integration could not be enabled. Screen-off audio may be interrupted.</string>
+    <string name="turn_service_unavailable">Secure relay is unavailable. Wi-Fi may work, but mobile-data audio may not connect.</string>
     <string name="leave_room">Leave Room</string>
     <string name="room_details_missing">Room details are missing.</string>
     <string name="member_status_speaking">Speaking</string>
@@ -96,4 +99,5 @@
     <string name="comms_notification_channel_description">Keeps Travel Buddy voice communication running.</string>
     <string name="comms_notification_title">Travel Buddy Comms</string>
     <string name="comms_notification_text">Voice comms running</string>
+    <string name="comms_notification_room">Travel Buddy room %1$s</string>
 </resources>

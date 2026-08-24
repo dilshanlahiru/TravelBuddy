@@ -15,6 +15,7 @@ import org.webrtc.SessionDescription
 class PeerConnectionClient(
     peerConnectionFactory: PeerConnectionFactory,
     localAudioTrack: AudioTrack,
+    iceServers: List<PeerConnection.IceServer>,
     private val listener: Listener,
 ) {
     interface Listener {
@@ -28,8 +29,7 @@ class PeerConnectionClient(
     private val peerConnection: PeerConnection
 
     init {
-        val iceServer = PeerConnection.IceServer.builder(STUN_SERVER).createIceServer()
-        val configuration = PeerConnection.RTCConfiguration(listOf(iceServer)).apply {
+        val configuration = PeerConnection.RTCConfiguration(iceServers).apply {
             sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN
             continualGatheringPolicy = PeerConnection.ContinualGatheringPolicy.GATHER_CONTINUALLY
         }
@@ -39,8 +39,11 @@ class PeerConnectionClient(
         peerConnection.addTrack(localAudioTrack, listOf(LOCAL_STREAM_ID))
     }
 
-    fun createOffer(onReady: (SessionDescription) -> Unit) {
-        val constraints = audioOnlyConstraints()
+    fun createOffer(
+        iceRestart: Boolean = false,
+        onReady: (SessionDescription) -> Unit,
+    ) {
+        val constraints = audioOnlyConstraints(iceRestart)
         peerConnection.createOffer(
             CreateSdpObserver(
                 onSuccess = { offer -> setLocalDescription(offer, onReady) },
@@ -48,6 +51,11 @@ class PeerConnectionClient(
             ),
             constraints,
         )
+    }
+
+    fun restartIce(createRestartOffer: Boolean, onOfferReady: (SessionDescription) -> Unit) {
+        peerConnection.restartIce()
+        if (createRestartOffer) createOffer(iceRestart = true, onReady = onOfferReady)
     }
 
     fun handleOffer(offer: SessionDescription, onAnswerReady: (SessionDescription) -> Unit) {
@@ -156,9 +164,11 @@ class PeerConnectionClient(
         }
     }
 
-    private fun audioOnlyConstraints(): MediaConstraints = MediaConstraints().apply {
+    private fun audioOnlyConstraints(iceRestart: Boolean = false): MediaConstraints =
+        MediaConstraints().apply {
         mandatory += MediaConstraints.KeyValuePair("OfferToReceiveAudio", "true")
         mandatory += MediaConstraints.KeyValuePair("OfferToReceiveVideo", "false")
+        if (iceRestart) mandatory += MediaConstraints.KeyValuePair("IceRestart", "true")
     }
 
     private class CreateSdpObserver(
@@ -182,7 +192,6 @@ class PeerConnectionClient(
     }
 
     companion object {
-        private const val STUN_SERVER = "stun:stun.l.google.com:19302"
         private const val LOCAL_STREAM_ID = "travel_buddy_audio_stream"
     }
 }

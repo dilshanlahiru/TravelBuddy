@@ -47,6 +47,7 @@ class CommsRoomActivity : ComponentActivity(), CommsForegroundService.StateListe
     private var availableAudioRoutes: Set<AudioRoute> = emptySet()
     private var selectedAudioRoute: AudioRoute = AudioRoute.EARPIECE
     private var updatingFloatingPttCheckBox = false
+    private var updatingMicModeSelection = false
 
     private val bluetoothPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
@@ -101,6 +102,7 @@ class CommsRoomActivity : ComponentActivity(), CommsForegroundService.StateListe
             commsService = localBinder.getService()
             isServiceBound = true
             commsService?.setRoomUiVisible(true)
+            syncMicModeFromService(localBinder.getService())
             commsService?.setStateListener(this@CommsRoomActivity)
             val overlayEnabled = commsService?.isFloatingPttEnabled == true &&
                 Settings.canDrawOverlays(this@CommsRoomActivity)
@@ -132,7 +134,18 @@ class CommsRoomActivity : ComponentActivity(), CommsForegroundService.StateListe
         memberAdapter = RoomMemberAdapter(this)
         binding.memberList.adapter = memberAdapter
         binding.micModeGroup.setOnCheckedChangeListener { _, checkedId ->
-            micMode = if (checkedId == R.id.toggleModeButton) MicMode.TOGGLE else MicMode.PTT
+            if (updatingMicModeSelection) return@setOnCheckedChangeListener
+            val selectedMode = when (checkedId) {
+                R.id.toggleModeButton -> MicMode.TOGGLE
+                R.id.pttModeButton -> MicMode.PTT
+                else -> return@setOnCheckedChangeListener
+            }
+            // RadioGroup can re-emit its current selection while the window is losing focus or
+            // restoring state. Only a real user mode change may mute an active microphone.
+            if (!hasWindowFocus() || selectedMode == micMode) {
+                return@setOnCheckedChangeListener
+            }
+            micMode = selectedMode
             commsService?.setMicMode(
                 if (micMode == MicMode.TOGGLE) RoomMember.MIC_MODE_TOGGLE else RoomMember.MIC_MODE_PTT,
             )
@@ -196,9 +209,6 @@ class CommsRoomActivity : ComponentActivity(), CommsForegroundService.StateListe
     override fun onStop() {
         memberListener?.remove()
         memberListener = null
-        if (micMode == MicMode.PTT) {
-            commsService?.setMicEnabled(false)
-        }
         if (isServiceBound) {
             commsService?.setRoomUiVisible(false)
             commsService?.setStateListener(null)
@@ -223,11 +233,6 @@ class CommsRoomActivity : ComponentActivity(), CommsForegroundService.StateListe
 
     override fun onPeerStatusesChanged(statuses: Map<String, WebRtcManager.PeerStatus>) {
         peerStatuses = statuses
-        if (statuses.values.none { it == WebRtcManager.PeerStatus.CONNECTED } &&
-            commsService?.isMicEnabled == true
-        ) {
-            commsService?.setMicEnabled(false)
-        }
         updateControlAvailability()
         renderConnectionStatus()
     }
@@ -459,6 +464,27 @@ class CommsRoomActivity : ComponentActivity(), CommsForegroundService.StateListe
         updatingFloatingPttCheckBox = true
         binding.floatingPttCheckBox.isChecked = checked
         updatingFloatingPttCheckBox = false
+    }
+
+    private fun syncMicModeFromService(service: CommsForegroundService) {
+        val serviceMode = if (service.currentMicMode == RoomMember.MIC_MODE_TOGGLE) {
+            MicMode.TOGGLE
+        } else {
+            MicMode.PTT
+        }
+        micMode = serviceMode
+        val checkedId = if (serviceMode == MicMode.TOGGLE) {
+            R.id.toggleModeButton
+        } else {
+            R.id.pttModeButton
+        }
+        if (binding.micModeGroup.checkedRadioButtonId != checkedId) {
+            updatingMicModeSelection = true
+            binding.micModeGroup.check(checkedId)
+            updatingMicModeSelection = false
+        }
+        updateMicButton(service.isMicEnabled)
+        updateControlAvailability()
     }
 
     private fun renderConnectionStatus() {

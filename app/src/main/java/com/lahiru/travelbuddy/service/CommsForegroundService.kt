@@ -13,6 +13,8 @@ import android.os.IBinder
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
+import android.util.Log
+import androidx.core.app.Person
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import com.lahiru.travelbuddy.R
@@ -26,12 +28,14 @@ import com.lahiru.travelbuddy.audio.AudioRouteManager
 import com.lahiru.travelbuddy.overlay.FloatingPttOverlayController
 import com.lahiru.travelbuddy.firebase.RoomRepository
 import com.lahiru.travelbuddy.firebase.SignalingRepository
+import com.lahiru.travelbuddy.firebase.TurnCredentialsRepository
 import com.lahiru.travelbuddy.ui.comms.CommsRoomActivity
 import com.lahiru.travelbuddy.ui.room.RoomNavigation
 import com.lahiru.travelbuddy.webrtc.WebRtcManager
+import com.lahiru.travelbuddy.telecom.TravelBuddyCallController
 
 class CommsForegroundService : Service(), WebRtcManager.Listener, AudioRouteManager.Listener,
-    FloatingPttOverlayController.Listener {
+    FloatingPttOverlayController.Listener, TravelBuddyCallController.Listener {
 
     interface StateListener {
         fun onAudioReady(micEnabled: Boolean)
@@ -50,6 +54,8 @@ class CommsForegroundService : Service(), WebRtcManager.Listener, AudioRouteMana
     private lateinit var webRtcManager: WebRtcManager
     private lateinit var audioRouteManager: AudioRouteManager
     private lateinit var floatingPttOverlay: FloatingPttOverlayController
+    private lateinit var commsPowerManager: CommsPowerManager
+    private var telecomCallController: TravelBuddyCallController? = null
     private var listener: StateListener? = null
     private var roomId: String = ""
     private var roomCode: String = ""
@@ -60,13 +66,16 @@ class CommsForegroundService : Service(), WebRtcManager.Listener, AudioRouteMana
     private var memberListener: ListenerRegistration? = null
     private var roomStatusListener: ValueEventListener? = null
     private var isStopping = false
+    private var isSessionStarting = false
     private var presenceRegistered = false
     private var availableAudioRoutes: Set<AudioRoute> = emptySet()
     private var selectedAudioRoute: AudioRoute = AudioRoute.EARPIECE
     private var isRoomUiVisible = false
     private var floatingPttEnabled = false
+    private var desiredToggleMicEnabled = false
     private val roomRepository = RoomRepository()
     private val signalingRepository = SignalingRepository()
+    private val turnCredentialsRepository = TurnCredentialsRepository()
     private val mainHandler = Handler(Looper.getMainLooper())
 
     val isAudioReady: Boolean
@@ -78,13 +87,32 @@ class CommsForegroundService : Service(), WebRtcManager.Listener, AudioRouteMana
     val isFloatingPttEnabled: Boolean
         get() = floatingPttEnabled
 
+    val currentMicMode: String
+        get() = micMode
+
     override fun onCreate() {
         super.onCreate()
         webRtcManager = WebRtcManager(applicationContext)
         audioRouteManager = AudioRouteManager(applicationContext, this)
         floatingPttOverlay = FloatingPttOverlayController(applicationContext, this)
-        floatingPttEnabled = getSharedPreferences(SERVICE_PREFERENCES, MODE_PRIVATE)
-            .getBoolean(PREF_FLOATING_PTT, false)
+        commsPowerManager = CommsPowerManager(applicationContext)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            telecomCallController = runCatching {
+                TravelBuddyCallController(applicationContext, this)
+            }.getOrElse { error ->
+                notifyError(
+                    error.localizedMessage ?: getString(R.string.telecom_registration_failed),
+                    fatal = false,
+                )
+                null
+            }
+        }
+        getSharedPreferences(SERVICE_PREFERENCES, MODE_PRIVATE).let { preferences ->
+            floatingPttEnabled = preferences.getBoolean(PREF_FLOATING_PTT, false)
+            micMode = preferences.getString(PREF_MIC_MODE, RoomMember.MIC_MODE_PTT)
+                ?: RoomMember.MIC_MODE_PTT
+            desiredToggleMicEnabled = preferences.getBoolean(PREF_TOGGLE_MIC_ENABLED, false)
+        }
         createNotificationChannel()
     }
 
@@ -93,43 +121,37 @@ class CommsForegroundService : Service(), WebRtcManager.Listener, AudioRouteMana
             stopComms()
             return START_NOT_STICKY
         }
-        roomId = intent?.getStringExtra(RoomNavigation.EXTRA_ROOM_ID).orEmpty().ifBlank { roomId }
-        roomCode = intent?.getStringExtra(RoomNavigation.EXTRA_ROOM_CODE).orEmpty().ifBlank { roomCode }
+        val preferences = getSharedPreferences(SERVICE_PREFERENCES, MODE_PRIVATE)
+        roomId = intent?.getStringExtra(RoomNavigation.EXTRA_ROOM_ID).orEmpty().ifBlank {
+            roomId.ifBlank { preferences.getString(PREF_ROOM_ID, "").orEmpty() }
+        }
+        roomCode = intent?.getStringExtra(RoomNavigation.EXTRA_ROOM_CODE).orEmpty().ifBlank {
+            roomCode.ifBlank { preferences.getString(PREF_ROOM_CODE, "").orEmpty() }
+        }
+        preferences.edit()
+            .putString(PREF_ROOM_ID, roomId)
+            .putString(PREF_ROOM_CODE, roomCode)
+            .apply()
         promoteToForeground()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            telecomCallController?.start(roomCode)
+        }
         webRtcManager.startLocalAudio()
             .onSuccess {
-                audioRouteManager.start()
-                updateFloatingPttOverlay()
-                if (localUid.isBlank()) {
-                    val uid = FirebaseAuth.getInstance().currentUser?.uid.orEmpty()
-                    if (uid.isBlank() || roomId.isBlank()) {
-                        notifyError(getString(R.string.room_details_missing))
-                        stopComms()
-                        return@onSuccess
-                    }
-                    localUid = uid
-                    signalingRepository.registerRoomPresence(roomId, uid) { result ->
-                        result.onSuccess {
-                            presenceRegistered = true
-                            publishStatus()
-                        }.onFailure { error ->
-                            notifyError(
-                                error.localizedMessage ?: getString(R.string.room_status_failed),
-                                fatal = false,
-                            )
-                        }
-                    }
-                    webRtcManager.joinRoom(roomId, uid, this)
-                        .onFailure { error ->
-                            notifyError(
-                                error.localizedMessage ?: getString(R.string.audio_start_failed),
-                            )
-                            stopComms()
-                            return@onSuccess
-                        }
-                    listenToRoomMembers()
-                    listenToRoomStatuses()
+                restoreToggleMicState()
+                commsPowerManager.start().onFailure { error ->
+                    notifyError(
+                        error.localizedMessage ?: getString(R.string.background_comms_failed),
+                        fatal = false,
+                    )
                 }
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O ||
+                    telecomCallController == null
+                ) {
+                    audioRouteManager.start()
+                }
+                updateFloatingPttOverlay()
+                if (localUid.isBlank()) startRoomSession()
                 publishStatus()
                 mainHandler.post {
                     listener?.onAudioReady(webRtcManager.isMicEnabled)
@@ -142,7 +164,7 @@ class CommsForegroundService : Service(), WebRtcManager.Listener, AudioRouteMana
                 notifyError(error.localizedMessage ?: getString(R.string.audio_start_failed))
                 stopComms()
             }
-        return START_NOT_STICKY
+        return START_REDELIVER_INTENT
     }
 
     override fun onBind(intent: Intent?): IBinder = binder
@@ -158,6 +180,16 @@ class CommsForegroundService : Service(), WebRtcManager.Listener, AudioRouteMana
     }
 
     fun setMicEnabled(enabled: Boolean) {
+        Log.i(
+            TAG,
+            "User mic request enabled=$enabled mode=$micMode uiVisible=$isRoomUiVisible",
+        )
+        desiredToggleMicEnabled = enabled && micMode == RoomMember.MIC_MODE_TOGGLE
+        persistDesiredMicState()
+        applyMicEnabled(enabled)
+    }
+
+    private fun applyMicEnabled(enabled: Boolean) {
         webRtcManager.setMicEnabled(enabled)
             .onSuccess {
                 publishStatus()
@@ -170,8 +202,18 @@ class CommsForegroundService : Service(), WebRtcManager.Listener, AudioRouteMana
             }
     }
 
+    private fun persistDesiredMicState() {
+        getSharedPreferences(SERVICE_PREFERENCES, MODE_PRIVATE)
+            .edit().putBoolean(PREF_TOGGLE_MIC_ENABLED, desiredToggleMicEnabled).apply()
+    }
+
     fun setMicMode(mode: String) {
         micMode = mode
+        if (mode != RoomMember.MIC_MODE_TOGGLE) desiredToggleMicEnabled = false
+        getSharedPreferences(SERVICE_PREFERENCES, MODE_PRIVATE).edit()
+            .putString(PREF_MIC_MODE, mode)
+            .putBoolean(PREF_TOGGLE_MIC_ENABLED, desiredToggleMicEnabled)
+            .apply()
         publishStatus()
         updateFloatingPttOverlay()
     }
@@ -189,11 +231,24 @@ class CommsForegroundService : Service(), WebRtcManager.Listener, AudioRouteMana
     }
 
     fun refreshAudioRoutes() {
-        audioRouteManager.refresh()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && telecomCallController != null) {
+            telecomCallController?.refreshAudioRoutes()
+        } else {
+            audioRouteManager.refresh()
+        }
     }
 
     fun selectAudioRoute(route: AudioRoute) {
-        audioRouteManager.select(route).onFailure { error ->
+        val result = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+            telecomCallController != null
+        ) {
+            telecomCallController?.selectAudioRoute(route) ?: Result.failure(
+                IllegalStateException("The Android call is not ready."),
+            )
+        } else {
+            audioRouteManager.select(route)
+        }
+        result.onFailure { error ->
             notifyError(
                 error.localizedMessage ?: getString(R.string.audio_route_failed),
                 fatal = false,
@@ -232,6 +287,33 @@ class CommsForegroundService : Service(), WebRtcManager.Listener, AudioRouteMana
         notifyError(message, fatal = false)
     }
 
+    override fun onTelecomCallActive() {
+        if (micMode == RoomMember.MIC_MODE_TOGGLE && desiredToggleMicEnabled) {
+            applyMicEnabled(true)
+        }
+    }
+
+    override fun onTelecomCallInactive() {
+        // Telecom already owns audio focus while a call is temporarily held. Keep the WebRTC
+        // track and the user's Toggle-mode intent enabled so capture can resume without the UI
+        // turning the microphone off when Android activates the call again.
+    }
+
+    override fun onTelecomCallDisconnected() {
+        mainHandler.post { stopComms() }
+    }
+
+    override fun onTelecomAudioRoutesChanged(
+        available: Set<AudioRoute>,
+        selected: AudioRoute,
+    ) {
+        onAudioRoutesChanged(available, selected)
+    }
+
+    override fun onTelecomError(message: String) {
+        notifyError(message, fatal = false)
+    }
+
     fun stopComms() {
         if (isStopping) return
         isStopping = true
@@ -251,6 +333,11 @@ class CommsForegroundService : Service(), WebRtcManager.Listener, AudioRouteMana
             }
         }
         floatingPttOverlay.hide()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            telecomCallController?.stop()
+        }
+        clearPersistedSession()
+        commsPowerManager.stop()
         webRtcManager.leaveRoom()
         audioRouteManager.stop()
         listener?.onMicStateChanged(false)
@@ -268,6 +355,11 @@ class CommsForegroundService : Service(), WebRtcManager.Listener, AudioRouteMana
         }
         listener = null
         floatingPttOverlay.hide()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            telecomCallController?.release()
+        }
+        telecomCallController = null
+        commsPowerManager.stop()
         webRtcManager.leaveRoom()
         audioRouteManager.stop()
         super.onDestroy()
@@ -284,6 +376,72 @@ class CommsForegroundService : Service(), WebRtcManager.Listener, AudioRouteMana
                 notifyError(error.localizedMessage ?: getString(R.string.member_list_failed))
             },
         )
+    }
+
+    private fun restoreToggleMicState() {
+        if (micMode != RoomMember.MIC_MODE_TOGGLE || !desiredToggleMicEnabled) return
+        webRtcManager.setMicEnabled(true).onFailure {
+            desiredToggleMicEnabled = false
+            getSharedPreferences(SERVICE_PREFERENCES, MODE_PRIVATE)
+                .edit().putBoolean(PREF_TOGGLE_MIC_ENABLED, false).apply()
+        }
+    }
+
+    private fun clearPersistedSession() {
+        desiredToggleMicEnabled = false
+        getSharedPreferences(SERVICE_PREFERENCES, MODE_PRIVATE).edit()
+            .remove(PREF_ROOM_ID)
+            .remove(PREF_ROOM_CODE)
+            .putString(PREF_MIC_MODE, RoomMember.MIC_MODE_PTT)
+            .putBoolean(PREF_TOGGLE_MIC_ENABLED, false)
+            .apply()
+    }
+
+    private fun startRoomSession() {
+        if (isSessionStarting || isStopping || localUid.isNotBlank()) return
+        val uid = FirebaseAuth.getInstance().currentUser?.uid.orEmpty()
+        if (uid.isBlank() || roomId.isBlank()) {
+            notifyError(getString(R.string.room_details_missing))
+            stopComms()
+            return
+        }
+        isSessionStarting = true
+        turnCredentialsRepository.fetch { credentialsResult ->
+            mainHandler.post {
+                if (isStopping) return@post
+                runCatching {
+                    val credentials = credentialsResult.getOrThrow()
+                    webRtcManager.configureIceServers(credentials).getOrThrow()
+                }.onFailure {
+                    notifyError(getString(R.string.turn_service_unavailable), fatal = false)
+                }
+
+                webRtcManager.joinRoom(roomId, uid, this)
+                    .onFailure { error ->
+                        isSessionStarting = false
+                        notifyError(
+                            error.localizedMessage ?: getString(R.string.audio_start_failed),
+                        )
+                        stopComms()
+                        return@post
+                    }
+                localUid = uid
+                signalingRepository.registerRoomPresence(roomId, uid) { result ->
+                    result.onSuccess {
+                        presenceRegistered = true
+                        publishStatus()
+                    }.onFailure { error ->
+                        notifyError(
+                            error.localizedMessage ?: getString(R.string.room_status_failed),
+                            fatal = false,
+                        )
+                    }
+                }
+                listenToRoomMembers()
+                listenToRoomStatuses()
+                isSessionStarting = false
+            }
+        }
     }
 
     private fun listenToRoomStatuses() {
@@ -336,10 +494,13 @@ class CommsForegroundService : Service(), WebRtcManager.Listener, AudioRouteMana
     }
 
     private fun promoteToForeground() {
-        val serviceType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
-        } else {
-            0
+        val serviceType = when {
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE ->
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.R ->
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+            else -> 0
         }
         ServiceCompat.startForeground(
             this,
@@ -361,14 +522,25 @@ class CommsForegroundService : Service(), WebRtcManager.Listener, AudioRouteMana
             contentIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
+        val leavePendingIntent = PendingIntent.getService(
+            this,
+            1,
+            Intent(this, CommsForegroundService::class.java).apply { action = ACTION_LEAVE },
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        val roomPerson = Person.Builder()
+            .setName(getString(R.string.comms_notification_room, roomCode))
+            .setImportant(true)
+            .build()
         return NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(getString(R.string.comms_notification_title))
             .setContentText(getString(R.string.comms_notification_text))
             .setContentIntent(contentPendingIntent)
             .setOngoing(true)
-            .setCategory(NotificationCompat.CATEGORY_SERVICE)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setCategory(NotificationCompat.CATEGORY_CALL)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setStyle(NotificationCompat.CallStyle.forOngoingCall(roomPerson, leavePendingIntent))
             .build()
     }
 
@@ -377,7 +549,7 @@ class CommsForegroundService : Service(), WebRtcManager.Listener, AudioRouteMana
         val channel = NotificationChannel(
             NOTIFICATION_CHANNEL_ID,
             getString(R.string.comms_notification_channel),
-            NotificationManager.IMPORTANCE_LOW,
+            NotificationManager.IMPORTANCE_DEFAULT,
         ).apply {
             description = getString(R.string.comms_notification_channel_description)
             setSound(null, null)
@@ -388,9 +560,14 @@ class CommsForegroundService : Service(), WebRtcManager.Listener, AudioRouteMana
     companion object {
         const val ACTION_START = "com.lahiru.travelbuddy.action.START_COMMS"
         const val ACTION_LEAVE = "com.lahiru.travelbuddy.action.LEAVE_COMMS"
-        private const val NOTIFICATION_CHANNEL_ID = "travel_buddy_comms"
+        private const val NOTIFICATION_CHANNEL_ID = "travel_buddy_calls_v2"
         private const val NOTIFICATION_ID = 1001
         private const val SERVICE_PREFERENCES = "comms_service_preferences"
         private const val PREF_FLOATING_PTT = "floating_ptt_enabled"
+        private const val PREF_ROOM_ID = "active_room_id"
+        private const val PREF_ROOM_CODE = "active_room_code"
+        private const val PREF_MIC_MODE = "mic_mode"
+        private const val PREF_TOGGLE_MIC_ENABLED = "toggle_mic_enabled"
+        private const val TAG = "TravelBuddyComms"
     }
 }

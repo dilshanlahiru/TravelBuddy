@@ -30,6 +30,7 @@ class FloatingPttOverlayController(
     private var overlayButton: ImageButton? = null
     private var layoutParams: WindowManager.LayoutParams? = null
     private var isPressed = false
+    private var isMicActive = false
 
     val isShowing: Boolean
         get() = overlayButton != null
@@ -60,7 +61,7 @@ class FloatingPttOverlayController(
             setPadding(dp(18), dp(18), dp(18), dp(18))
             elevation = dp(8).toFloat()
             contentDescription = applicationContext.getString(R.string.floating_ptt_description)
-            background = circleDrawable(MUTED_COLOR)
+            background = circleDrawable(if (isMicActive) LIVE_COLOR else MUTED_COLOR)
             setOnTouchListener(createTouchListener(this, params))
         }
         runCatching { windowManager.addView(button, params) }
@@ -85,7 +86,7 @@ class FloatingPttOverlayController(
     }
 
     fun setMicActive(active: Boolean) {
-        isPressed = active
+        isMicActive = active
         overlayButton?.background = circleDrawable(if (active) LIVE_COLOR else MUTED_COLOR)
     }
 
@@ -136,6 +137,7 @@ class FloatingPttOverlayController(
     private fun setPressed(pressed: Boolean) {
         if (isPressed == pressed) return
         isPressed = pressed
+        isMicActive = pressed
         overlayButton?.background = circleDrawable(if (pressed) LIVE_COLOR else MUTED_COLOR)
         listener.onOverlayMicPressed(pressed)
     }

@@ -3,6 +3,8 @@ package com.lahiru.travelbuddy.webrtc
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
+import com.lahiru.travelbuddy.data.model.IceServerConfig
 import org.webrtc.AudioSource
 import org.webrtc.AudioTrack
 import org.webrtc.IceCandidate
@@ -40,6 +42,7 @@ class WebRtcManager(context: Context) {
     private var peerConnectionFactory: PeerConnectionFactory? = null
     private var localAudioSource: AudioSource? = null
     private var localAudioTrack: AudioTrack? = null
+    private var iceServers: List<PeerConnection.IceServer> = defaultIceServers()
     private var roomId = ""
     private var localUid = ""
     private var listener: Listener? = null
@@ -75,6 +78,21 @@ class WebRtcManager(context: Context) {
         if (track.enabled() == enabled) return@runCatching
         check(track.setEnabled(enabled)) { "Unable to change microphone state." }
         check(track.enabled() == enabled) { "Microphone state did not change." }
+    }
+
+    @Synchronized
+    fun configureIceServers(configs: List<IceServerConfig>): Result<Unit> = runCatching {
+        check(peers.isEmpty()) { "ICE servers cannot be changed while peers are connected." }
+        val configured = configs.flatMap { config ->
+            config.urls.map { url ->
+                PeerConnection.IceServer.builder(url)
+                    .setUsername(config.username)
+                    .setPassword(config.credential)
+                    .createIceServer()
+            }
+        }
+        check(configured.isNotEmpty()) { "No ICE servers were provided." }
+        iceServers = configured
     }
 
     fun joinRoom(roomId: String, localUid: String, listener: Listener): Result<Unit> = runCatching {
@@ -121,6 +139,7 @@ class WebRtcManager(context: Context) {
             session.peerConnection = PeerConnectionClient(
                 checkNotNull(peerConnectionFactory),
                 checkNotNull(localAudioTrack),
+                iceServers,
                 object : PeerConnectionClient.Listener {
                     override fun onLocalIceCandidate(candidate: IceCandidate) {
                         mainHandler.post {
@@ -202,6 +221,7 @@ class WebRtcManager(context: Context) {
     ) {
         if (peers[remoteUid] !== session) return
         val status = state.toPeerStatus()
+        Log.i(TAG, "Peer ${remoteUid.take(6)} state=$status attempt=${session.reconnectAttempts}")
         updatePeerStatus(remoteUid, session, status)
         when (status) {
             PeerStatus.CONNECTED -> {
@@ -209,7 +229,18 @@ class WebRtcManager(context: Context) {
                 session.reconnectRunnable?.let(mainHandler::removeCallbacks)
                 session.reconnectRunnable = null
             }
-            PeerStatus.DISCONNECTED, PeerStatus.FAILED -> scheduleReconnect(remoteUid, session)
+            PeerStatus.DISCONNECTED -> beginIceRecovery(remoteUid, session)
+            PeerStatus.FAILED -> {
+                session.reconnectRunnable?.let(mainHandler::removeCallbacks)
+                session.reconnectRunnable = null
+                scheduleReconnect(
+                    remoteUid,
+                    session,
+                    RECONNECT_DELAYS_MS[session.reconnectAttempts.coerceAtMost(
+                        RECONNECT_DELAYS_MS.lastIndex,
+                    )],
+                )
+            }
             else -> Unit
         }
     }
@@ -218,10 +249,27 @@ class WebRtcManager(context: Context) {
         if (peers[remoteUid] !== session) return
         listener?.onWebRtcError(remoteUid, message)
         updatePeerStatus(remoteUid, session, PeerStatus.FAILED)
-        scheduleReconnect(remoteUid, session)
+        scheduleReconnect(
+            remoteUid,
+            session,
+            RECONNECT_DELAYS_MS[session.reconnectAttempts.coerceAtMost(
+                RECONNECT_DELAYS_MS.lastIndex,
+            )],
+        )
     }
 
-    private fun scheduleReconnect(remoteUid: String, session: PeerSession) {
+    private fun beginIceRecovery(remoteUid: String, session: PeerSession) {
+        if (session.reconnectRunnable != null || remoteUid !in desiredRemoteUids) return
+        Log.i(TAG, "Restarting ICE for peer ${remoteUid.take(6)} before rebuilding")
+        session.peerConnection?.restartIce(
+            createRestartOffer = localUid < remoteUid,
+        ) { offer ->
+            if (peers[remoteUid] === session) session.signaling?.sendOffer(offer)
+        }
+        scheduleReconnect(remoteUid, session, DISCONNECTED_RECOVERY_GRACE_MS)
+    }
+
+    private fun scheduleReconnect(remoteUid: String, session: PeerSession, delayMs: Long) {
         if (session.reconnectRunnable != null || remoteUid !in desiredRemoteUids) return
         if (session.reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) return
         val nextAttempt = session.reconnectAttempts + 1
@@ -231,7 +279,7 @@ class WebRtcManager(context: Context) {
             connectToPeer(remoteUid, reconnectAttempts = nextAttempt)
         }
         session.reconnectRunnable = runnable
-        mainHandler.postDelayed(runnable, RECONNECT_DELAYS_MS[session.reconnectAttempts])
+        mainHandler.postDelayed(runnable, delayMs)
     }
 
     private fun updatePeerStatus(remoteUid: String, session: PeerSession, status: PeerStatus) {
@@ -278,9 +326,16 @@ class WebRtcManager(context: Context) {
 
     companion object {
         private const val LOCAL_AUDIO_TRACK_ID = "travel_buddy_local_audio"
+        private const val DEFAULT_STUN_SERVER = "stun:stun.cloudflare.com:3478"
         private const val MAX_RECONNECT_ATTEMPTS = 3
+        private const val DISCONNECTED_RECOVERY_GRACE_MS = 20_000L
         private val RECONNECT_DELAYS_MS = longArrayOf(1_500L, 3_000L, 6_000L)
         private val isWebRtcInitialized = AtomicBoolean(false)
+        private const val TAG = "TravelBuddyWebRtc"
+
+        private fun defaultIceServers(): List<PeerConnection.IceServer> = listOf(
+            PeerConnection.IceServer.builder(DEFAULT_STUN_SERVER).createIceServer(),
+        )
 
         private fun initializeWebRtcOnce(context: Context) {
             if (isWebRtcInitialized.compareAndSet(false, true)) {

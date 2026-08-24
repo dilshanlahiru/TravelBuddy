@@ -22,4 +22,5 @@ class MicControlPolicyTest {
         assertEquals(false, MicControlPolicy.desiredState(MicMode.TOGGLE, MicGesture.RELEASE, true))
         assertNull(MicControlPolicy.desiredState(MicMode.TOGGLE, MicGesture.CANCEL, true))
     }
+
 }
