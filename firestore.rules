@@ -1,0 +1,74 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    match /users/{uid} {
+      allow read: if signedIn();
+      allow create, update: if signedIn()
+        && request.auth.uid == uid
+        && request.resource.data.uid == uid;
+    }
+
+    match /rooms/{roomId} {
+      allow read: if signedIn();
+      allow create: if signedIn()
+        && request.resource.data.roomId == roomId
+        && request.resource.data.roomCode == roomId
+        && request.resource.data.createdBy == request.auth.uid
+        && request.resource.data.status == 'ACTIVE'
+        && request.resource.data.memberCount == 1;
+      allow update: if signedIn() && (
+        (
+          resource.data.status == 'ACTIVE'
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['memberCount'])
+          && request.resource.data.memberCount == resource.data.memberCount + 1
+          && !exists(/databases/$(database)/documents/rooms/$(roomId)/members/$(request.auth.uid))
+          && existsAfter(/databases/$(database)/documents/rooms/$(roomId)/members/$(request.auth.uid))
+        )
+        ||
+        (
+          resource.data.createdBy == request.auth.uid
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status'])
+          && request.resource.data.status == 'CLOSED'
+        )
+        ||
+        (
+          resource.data.status == 'ACTIVE'
+          && exists(/databases/$(database)/documents/rooms/$(roomId)/members/$(request.auth.uid))
+          && !existsAfter(/databases/$(database)/documents/rooms/$(roomId)/members/$(request.auth.uid))
+          && request.resource.data.memberCount == resource.data.memberCount - 1
+          && request.resource.data.memberCount >= 0
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['memberCount', 'status'])
+          && (
+            (request.resource.data.memberCount > 0 && request.resource.data.status == 'ACTIVE')
+            ||
+            (request.resource.data.memberCount == 0 && request.resource.data.status == 'CLOSED')
+          )
+        )
+      );
+
+      match /members/{uid} {
+        allow read: if signedIn();
+        allow create: if signedIn()
+          && request.auth.uid == uid
+          && request.resource.data.uid == uid
+          && request.resource.data.keys().hasOnly([
+            'uid', 'displayName', 'photoUrl', 'joinedAt',
+            'isConnected', 'isSpeaking', 'micMode'
+          ]);
+        allow update: if signedIn()
+          && request.auth.uid == uid
+          && request.resource.data.uid == uid
+          && request.resource.data.keys().hasOnly([
+            'uid', 'displayName', 'photoUrl', 'joinedAt',
+            'isConnected', 'isSpeaking', 'micMode'
+          ]);
+        allow delete: if signedIn() && request.auth.uid == uid;
+      }
+    }
+  }
+}

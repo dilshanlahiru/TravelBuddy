@@ -1,0 +1,85 @@
+{
+  "project_info": {
+    "project_number": "403216328103",
+    "firebase_url": "https://travelbuddy-e7367-default-rtdb.asia-southeast1.firebasedatabase.app",
+    "project_id": "travelbuddy-e7367",
+    "storage_bucket": "travelbuddy-e7367.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:403216328103:android:2b367a773d0face03f8282",
+        "android_client_info": {
+          "package_name": "com.lahiru.travelbuddy"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "403216328103-apkjdj4i701vt2aou6nr89abr3v9cvhb.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.lahiru.travelbuddy",
+            "certificate_hash": "dc9f2b418a4f21a4885d2f6f0240415205db5c3c"
+          }
+        },
+        {
+          "client_id": "403216328103-k6c7cuag01o0iuud4ined6kn018pfvf9.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyALLc2zSX3DrjKmUQ8bDLgxGTdBP68EbQs"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "403216328103-k6c7cuag01o0iuud4ined6kn018pfvf9.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:403216328103:android:60d1067c6d033db13f8282",
+        "android_client_info": {
+          "package_name": "com.yourname.travelbuddy"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "403216328103-daf5n4i9smdjje8d1qlmec461s0i7bme.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.yourname.travelbuddy",
+            "certificate_hash": "dc9f2b418a4f21a4885d2f6f0240415205db5c3c"
+          }
+        },
+        {
+          "client_id": "403216328103-k6c7cuag01o0iuud4ined6kn018pfvf9.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyALLc2zSX3DrjKmUQ8bDLgxGTdBP68EbQs"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "403216328103-k6c7cuag01o0iuud4ined6kn018pfvf9.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
