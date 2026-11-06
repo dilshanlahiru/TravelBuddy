@@ -11,5 +11,8 @@
 .cxx
 local.properties
 functions/node_modules/
+functions/rules-tests/node_modules/
 functions/.secret.local
 firebase-debug.log
+functions/database-debug.log
+functions/firestore-debug.log

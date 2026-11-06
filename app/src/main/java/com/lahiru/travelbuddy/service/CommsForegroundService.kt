@@ -19,14 +19,12 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import com.lahiru.travelbuddy.R
 import com.google.firebase.auth.FirebaseAuth
-import com.google.firebase.firestore.ListenerRegistration
 import com.google.firebase.database.ValueEventListener
 import com.lahiru.travelbuddy.data.model.RoomMember
 import com.lahiru.travelbuddy.data.model.RoomLiveStatus
 import com.lahiru.travelbuddy.audio.AudioRoute
 import com.lahiru.travelbuddy.audio.AudioRouteManager
 import com.lahiru.travelbuddy.overlay.FloatingPttOverlayController
-import com.lahiru.travelbuddy.firebase.RoomRepository
 import com.lahiru.travelbuddy.firebase.SignalingRepository
 import com.lahiru.travelbuddy.firebase.TurnCredentialsRepository
 import com.lahiru.travelbuddy.ui.comms.CommsRoomActivity
@@ -63,7 +61,6 @@ class CommsForegroundService : Service(), WebRtcManager.Listener, AudioRouteMana
     private var micMode: String = RoomMember.MIC_MODE_PTT
     private var peerStatuses: Map<String, WebRtcManager.PeerStatus> = emptyMap()
     private var roomStatuses: Map<String, RoomLiveStatus> = emptyMap()
-    private var memberListener: ListenerRegistration? = null
     private var roomStatusListener: ValueEventListener? = null
     private var isStopping = false
     private var isSessionStarting = false
@@ -73,7 +70,6 @@ class CommsForegroundService : Service(), WebRtcManager.Listener, AudioRouteMana
     private var isRoomUiVisible = false
     private var floatingPttEnabled = false
     private var desiredToggleMicEnabled = false
-    private val roomRepository = RoomRepository()
     private val signalingRepository = SignalingRepository()
     private val turnCredentialsRepository = TurnCredentialsRepository()
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -117,10 +113,11 @@ class CommsForegroundService : Service(), WebRtcManager.Listener, AudioRouteMana
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_LEAVE) {
-            stopComms()
+        if (intent?.action == ACTION_LEAVE_VOICE) {
+            stopVoice()
             return START_NOT_STICKY
         }
+        isStopping = false
         val preferences = getSharedPreferences(SERVICE_PREFERENCES, MODE_PRIVATE)
         roomId = intent?.getStringExtra(RoomNavigation.EXTRA_ROOM_ID).orEmpty().ifBlank {
             roomId.ifBlank { preferences.getString(PREF_ROOM_ID, "").orEmpty() }
@@ -162,9 +159,9 @@ class CommsForegroundService : Service(), WebRtcManager.Listener, AudioRouteMana
             }
             .onFailure { error ->
                 notifyError(error.localizedMessage ?: getString(R.string.audio_start_failed))
-                stopComms()
+                stopVoice()
             }
-        return START_REDELIVER_INTENT
+        return START_NOT_STICKY
     }
 
     override fun onBind(intent: Intent?): IBinder = binder
@@ -300,7 +297,7 @@ class CommsForegroundService : Service(), WebRtcManager.Listener, AudioRouteMana
     }
 
     override fun onTelecomCallDisconnected() {
-        mainHandler.post { stopComms() }
+        mainHandler.post { stopVoice() }
     }
 
     override fun onTelecomAudioRoutesChanged(
@@ -314,24 +311,13 @@ class CommsForegroundService : Service(), WebRtcManager.Listener, AudioRouteMana
         notifyError(message, fatal = false)
     }
 
-    fun stopComms() {
+    fun stopVoice() {
         if (isStopping) return
         isStopping = true
-        memberListener?.remove()
-        memberListener = null
+        val leavingRoomId = roomId
+        val leavingUid = localUid
         removeRoomStatusListener()
         presenceRegistered = false
-        if (localUid.isNotBlank() && roomId.isNotBlank()) {
-            signalingRepository.removeRoomStatus(roomId, localUid)
-            roomRepository.leaveRoom(roomId, localUid) { result ->
-                result.exceptionOrNull()?.let { error ->
-                    notifyError(
-                        error.localizedMessage ?: getString(R.string.leave_room_failed),
-                        fatal = false,
-                    )
-                }
-            }
-        }
         floatingPttOverlay.hide()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             telecomCallController?.stop()
@@ -339,6 +325,12 @@ class CommsForegroundService : Service(), WebRtcManager.Listener, AudioRouteMana
         clearPersistedSession()
         commsPowerManager.stop()
         webRtcManager.leaveRoom()
+        localUid = ""
+        roomId = ""
+        roomCode = ""
+        if (leavingRoomId.isNotBlank() && leavingUid.isNotBlank()) {
+            signalingRepository.removeRoomStatus(leavingRoomId, leavingUid)
+        }
         audioRouteManager.stop()
         listener?.onMicStateChanged(false)
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
@@ -346,8 +338,6 @@ class CommsForegroundService : Service(), WebRtcManager.Listener, AudioRouteMana
     }
 
     override fun onDestroy() {
-        memberListener?.remove()
-        memberListener = null
         removeRoomStatusListener()
         presenceRegistered = false
         if (localUid.isNotBlank() && roomId.isNotBlank()) {
@@ -363,19 +353,6 @@ class CommsForegroundService : Service(), WebRtcManager.Listener, AudioRouteMana
         webRtcManager.leaveRoom()
         audioRouteManager.stop()
         super.onDestroy()
-    }
-
-    private fun listenToRoomMembers() {
-        if (memberListener != null) return
-        memberListener = roomRepository.listenToMembers(
-            roomId = roomId,
-            onMembersChanged = { members ->
-                webRtcManager.updateRoomMembers(members.map { it.uid })
-            },
-            onError = { error ->
-                notifyError(error.localizedMessage ?: getString(R.string.member_list_failed))
-            },
-        )
     }
 
     private fun restoreToggleMicState() {
@@ -402,10 +379,28 @@ class CommsForegroundService : Service(), WebRtcManager.Listener, AudioRouteMana
         val uid = FirebaseAuth.getInstance().currentUser?.uid.orEmpty()
         if (uid.isBlank() || roomId.isBlank()) {
             notifyError(getString(R.string.room_details_missing))
-            stopComms()
+            stopVoice()
             return
         }
         isSessionStarting = true
+        localUid = uid
+        signalingRepository.registerRoomPresence(roomId, uid, micMode) { result ->
+            mainHandler.post {
+                if (isStopping) return@post
+                result.onSuccess {
+                    presenceRegistered = true
+                    listenToRoomStatuses()
+                    fetchTurnCredentialsAndJoin(uid)
+                }.onFailure { error ->
+                    isSessionStarting = false
+                    notifyError(error.localizedMessage ?: getString(R.string.room_status_failed))
+                    stopVoice()
+                }
+            }
+        }
+    }
+
+    private fun fetchTurnCredentialsAndJoin(uid: String) {
         turnCredentialsRepository.fetch { credentialsResult ->
             mainHandler.post {
                 if (isStopping) return@post
@@ -422,23 +417,10 @@ class CommsForegroundService : Service(), WebRtcManager.Listener, AudioRouteMana
                         notifyError(
                             error.localizedMessage ?: getString(R.string.audio_start_failed),
                         )
-                        stopComms()
+                        stopVoice()
                         return@post
                     }
-                localUid = uid
-                signalingRepository.registerRoomPresence(roomId, uid) { result ->
-                    result.onSuccess {
-                        presenceRegistered = true
-                        publishStatus()
-                    }.onFailure { error ->
-                        notifyError(
-                            error.localizedMessage ?: getString(R.string.room_status_failed),
-                            fatal = false,
-                        )
-                    }
-                }
-                listenToRoomMembers()
-                listenToRoomStatuses()
+                publishStatus()
                 isSessionStarting = false
             }
         }
@@ -450,13 +432,17 @@ class CommsForegroundService : Service(), WebRtcManager.Listener, AudioRouteMana
             roomId = roomId,
             onStatusesChanged = { statuses ->
                 roomStatuses = statuses
-                mainHandler.post { listener?.onRoomStatusesChanged(statuses) }
+                mainHandler.post {
+                    webRtcManager.updateRoomMembers(statuses.keys.toList())
+                    listener?.onRoomStatusesChanged(statuses)
+                }
             },
             onError = { error ->
                 notifyError(
                     error.localizedMessage ?: getString(R.string.room_status_failed),
                     fatal = false,
                 )
+                stopVoice()
             },
         )
     }
@@ -525,7 +511,9 @@ class CommsForegroundService : Service(), WebRtcManager.Listener, AudioRouteMana
         val leavePendingIntent = PendingIntent.getService(
             this,
             1,
-            Intent(this, CommsForegroundService::class.java).apply { action = ACTION_LEAVE },
+            Intent(this, CommsForegroundService::class.java).apply {
+                action = ACTION_LEAVE_VOICE
+            },
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         val roomPerson = Person.Builder()
@@ -558,8 +546,8 @@ class CommsForegroundService : Service(), WebRtcManager.Listener, AudioRouteMana
     }
 
     companion object {
-        const val ACTION_START = "com.lahiru.travelbuddy.action.START_COMMS"
-        const val ACTION_LEAVE = "com.lahiru.travelbuddy.action.LEAVE_COMMS"
+        const val ACTION_JOIN_VOICE = "com.lahiru.travelbuddy.action.JOIN_VOICE"
+        const val ACTION_LEAVE_VOICE = "com.lahiru.travelbuddy.action.LEAVE_VOICE"
         private const val NOTIFICATION_CHANNEL_ID = "travel_buddy_calls_v2"
         private const val NOTIFICATION_ID = 1001
         private const val SERVICE_PREFERENCES = "comms_service_preferences"

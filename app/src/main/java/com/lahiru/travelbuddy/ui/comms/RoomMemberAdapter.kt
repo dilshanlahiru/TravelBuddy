@@ -37,9 +37,15 @@ class RoomMemberAdapter(
         val member = getItem(position)
         binding.memberNameText.text = member.displayName
         binding.memberStatusText.text = when {
+            member.isSpeaking && member.isNavigating ->
+                binding.root.context.getString(R.string.member_status_speaking_navigating)
             member.isSpeaking -> binding.root.context.getString(R.string.member_status_speaking)
-            member.isConnected -> binding.root.context.getString(R.string.member_status_connected)
-            else -> binding.root.context.getString(R.string.member_status_joined)
+            member.isVoiceJoined && member.isNavigating ->
+                binding.root.context.getString(R.string.member_status_voice_navigating)
+            member.isVoiceJoined -> binding.root.context.getString(R.string.member_status_voice)
+            member.isNavigating ->
+                binding.root.context.getString(R.string.member_status_navigating)
+            else -> binding.root.context.getString(R.string.member_status_in_room)
         }
         binding.speakingIndicator.visibility = if (member.isSpeaking) View.VISIBLE else View.INVISIBLE
         return binding.root

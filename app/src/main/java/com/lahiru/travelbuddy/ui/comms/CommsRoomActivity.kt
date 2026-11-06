@@ -17,25 +17,39 @@ import android.app.AlertDialog
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
+import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.database.ValueEventListener
 import com.google.firebase.firestore.ListenerRegistration
 import com.lahiru.travelbuddy.R
 import com.lahiru.travelbuddy.databinding.ActivityCommsRoomBinding
 import com.lahiru.travelbuddy.firebase.RoomRepository
 import com.lahiru.travelbuddy.data.model.RoomMember
 import com.lahiru.travelbuddy.data.model.RoomLiveStatus
+import com.lahiru.travelbuddy.data.model.NavigationLiveStatus
 import com.lahiru.travelbuddy.audio.AudioRoute
 import com.lahiru.travelbuddy.webrtc.WebRtcManager
 import com.lahiru.travelbuddy.service.CommsForegroundService
+import com.lahiru.travelbuddy.service.NavigationForegroundService
+import com.lahiru.travelbuddy.firebase.GroupNavigationRepository
+import com.lahiru.travelbuddy.firebase.SignalingRepository
 import com.lahiru.travelbuddy.ui.room.RoomNavigation
+import com.lahiru.travelbuddy.ui.navigation.GroupNavigationActivity
 
 class CommsRoomActivity : ComponentActivity(), CommsForegroundService.StateListener {
 
     private lateinit var binding: ActivityCommsRoomBinding
     private val roomRepository = RoomRepository()
+    private val signalingRepository = SignalingRepository()
+    private val navigationRepository = GroupNavigationRepository()
     private lateinit var memberAdapter: RoomMemberAdapter
     private var memberListener: ListenerRegistration? = null
+    private var voiceStatusListener: ValueEventListener? = null
+    private var navigationStatusListener: ValueEventListener? = null
+    private var isLeavingRoom = false
     private var commsService: CommsForegroundService? = null
     private var isServiceBound = false
+    private var navigationService: NavigationForegroundService? = null
+    private var isNavigationServiceBound = false
     private var permissionRequestStarted = false
     private var roomId: String = ""
     private var roomCode: String = ""
@@ -43,11 +57,14 @@ class CommsRoomActivity : ComponentActivity(), CommsForegroundService.StateListe
     private var isAudioReady = false
     private var roomMembers: List<RoomMember> = emptyList()
     private var roomStatuses: Map<String, RoomLiveStatus> = emptyMap()
+    private var navigationStatuses: Map<String, NavigationLiveStatus> = emptyMap()
     private var peerStatuses: Map<String, WebRtcManager.PeerStatus> = emptyMap()
     private var availableAudioRoutes: Set<AudioRoute> = emptySet()
     private var selectedAudioRoute: AudioRoute = AudioRoute.EARPIECE
     private var updatingFloatingPttCheckBox = false
     private var updatingMicModeSelection = false
+    private val currentUid: String
+        get() = FirebaseAuth.getInstance().currentUser?.uid.orEmpty()
 
     private val bluetoothPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
@@ -96,6 +113,30 @@ class CommsRoomActivity : ComponentActivity(), CommsForegroundService.StateListe
         }
     }
 
+    private val navigationPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) { results ->
+        permissionRequestStarted = false
+        val locationGranted = results[Manifest.permission.ACCESS_FINE_LOCATION] == true ||
+            results[Manifest.permission.ACCESS_COARSE_LOCATION] == true ||
+            hasLocationPermission()
+        if (locationGranted) {
+            startAndBindNavigationService(openMap = true)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                results[Manifest.permission.POST_NOTIFICATIONS] == false
+            ) {
+                Toast.makeText(this, R.string.notification_permission_denied, Toast.LENGTH_LONG)
+                    .show()
+            }
+        } else {
+            Toast.makeText(
+                this,
+                R.string.group_route_location_permission,
+                Toast.LENGTH_LONG,
+            ).show()
+        }
+    }
+
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
             val localBinder = binder as? CommsForegroundService.LocalBinder ?: return
@@ -114,6 +155,38 @@ class CommsRoomActivity : ComponentActivity(), CommsForegroundService.StateListe
             commsService = null
             isServiceBound = false
             showAudioUnavailableState()
+        }
+    }
+
+    private val navigationServiceConnection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
+            val localBinder = binder as? NavigationForegroundService.LocalBinder ?: return
+            navigationService = localBinder.getService()
+            isNavigationServiceBound = true
+            navigationService?.setStateListener(
+                object : NavigationForegroundService.StateListener {
+                    override fun onNavigationStateChanged(
+                        active: Boolean,
+                        location: android.location.Location?,
+                        route: com.lahiru.travelbuddy.data.model.GroupRoute?,
+                        progress: com.lahiru.travelbuddy.ui.navigation.RouteProgress?,
+                    ) {
+                        updateServiceControls()
+                    }
+
+                    override fun onNavigationError(message: String) {
+                        Toast.makeText(this@CommsRoomActivity, message, Toast.LENGTH_LONG).show()
+                        updateServiceControls()
+                    }
+                },
+            )
+            updateServiceControls()
+        }
+
+        override fun onServiceDisconnected(name: ComponentName?) {
+            navigationService = null
+            isNavigationServiceBound = false
+            updateServiceControls()
         }
     }
 
@@ -184,7 +257,17 @@ class CommsRoomActivity : ComponentActivity(), CommsForegroundService.StateListe
             permissionRequestStarted = false
             requestPermissionsOrStart()
         }
+        binding.joinVoiceButton.setOnClickListener {
+            permissionRequestStarted = false
+            requestPermissionsOrStart()
+        }
+        binding.leaveVoiceButton.setOnClickListener { leaveVoice() }
+        binding.joinNavigationButton.setOnClickListener {
+            requestNavigationPermissionOrStart()
+        }
+        binding.leaveNavigationButton.setOnClickListener { leaveNavigation() }
         binding.leaveRoomButton.setOnClickListener { leaveRoom() }
+        binding.openGroupMapButton.setOnClickListener { openGroupMap() }
         binding.audioOutputButton.setOnClickListener { requestRoutesAndShowDialog() }
         binding.floatingPttCheckBox.setOnCheckedChangeListener { _, checked ->
             if (updatingFloatingPttCheckBox) return@setOnCheckedChangeListener
@@ -197,18 +280,27 @@ class CommsRoomActivity : ComponentActivity(), CommsForegroundService.StateListe
             }
         }
         showAudioUnavailableState()
+        updateServiceControls()
     }
 
     override fun onStart() {
         super.onStart()
         if (roomId.isBlank()) return
         listenToMembers()
-        requestPermissionsOrStart()
+        listenToServiceStatuses()
     }
 
     override fun onStop() {
         memberListener?.remove()
         memberListener = null
+        voiceStatusListener?.let {
+            signalingRepository.removeRoomStatusesListener(roomId, it)
+        }
+        voiceStatusListener = null
+        navigationStatusListener?.let {
+            navigationRepository.removeNavigationStatusesListener(roomId, it)
+        }
+        navigationStatusListener = null
         if (isServiceBound) {
             commsService?.setRoomUiVisible(false)
             commsService?.setStateListener(null)
@@ -216,12 +308,19 @@ class CommsRoomActivity : ComponentActivity(), CommsForegroundService.StateListe
             isServiceBound = false
             commsService = null
         }
+        if (isNavigationServiceBound) {
+            navigationService?.setStateListener(null)
+            unbindService(navigationServiceConnection)
+            isNavigationServiceBound = false
+            navigationService = null
+        }
         super.onStop()
     }
 
     override fun onAudioReady(micEnabled: Boolean) {
         isAudioReady = true
         binding.permissionButton.visibility = android.view.View.GONE
+        updateServiceControls()
         updateControlAvailability()
         renderConnectionStatus()
         updateMicButton(micEnabled)
@@ -240,6 +339,7 @@ class CommsRoomActivity : ComponentActivity(), CommsForegroundService.StateListe
     override fun onRoomStatusesChanged(statuses: Map<String, RoomLiveStatus>) {
         roomStatuses = statuses
         renderMembers()
+        updateServiceControls()
     }
 
     override fun onAudioRoutesChanged(available: Set<AudioRoute>, selected: AudioRoute) {
@@ -285,10 +385,43 @@ class CommsRoomActivity : ComponentActivity(), CommsForegroundService.StateListe
         permissionLauncher.launch(arrayOf(Manifest.permission.POST_NOTIFICATIONS))
     }
 
+    private fun requestNavigationPermissionOrStart() {
+        if (hasLocationPermission()) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) !=
+                PackageManager.PERMISSION_GRANTED && !permissionRequestStarted
+            ) {
+                permissionRequestStarted = true
+                navigationPermissionLauncher.launch(
+                    arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+                )
+            } else {
+                startAndBindNavigationService(openMap = true)
+            }
+            return
+        }
+        if (permissionRequestStarted) return
+        permissionRequestStarted = true
+        val permissions = buildList {
+            add(Manifest.permission.ACCESS_FINE_LOCATION)
+            add(Manifest.permission.ACCESS_COARSE_LOCATION)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                add(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
+        navigationPermissionLauncher.launch(permissions.toTypedArray())
+    }
+
+    private fun hasLocationPermission(): Boolean =
+        ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) ==
+            PackageManager.PERMISSION_GRANTED ||
+            ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) ==
+            PackageManager.PERMISSION_GRANTED
+
     private fun startAndBindCommsService() {
         if (!hasAudioPermission()) return
         val serviceIntent = Intent(this, CommsForegroundService::class.java).apply {
-            action = CommsForegroundService.ACTION_START
+            action = CommsForegroundService.ACTION_JOIN_VOICE
             putExtra(RoomNavigation.EXTRA_ROOM_ID, roomId)
             putExtra(RoomNavigation.EXTRA_ROOM_CODE, roomCode)
         }
@@ -303,6 +436,32 @@ class CommsRoomActivity : ComponentActivity(), CommsForegroundService.StateListe
                 error.localizedMessage ?: getString(R.string.audio_start_failed),
                 fatal = true,
             )
+        }
+    }
+
+    private fun startAndBindNavigationService(openMap: Boolean) {
+        if (!hasLocationPermission()) return
+        val serviceIntent = Intent(this, NavigationForegroundService::class.java).apply {
+            action = NavigationForegroundService.ACTION_JOIN_NAVIGATION
+            putExtra(RoomNavigation.EXTRA_ROOM_ID, roomId)
+            putExtra(RoomNavigation.EXTRA_ROOM_CODE, roomCode)
+        }
+        try {
+            ContextCompat.startForegroundService(this, serviceIntent)
+            if (!isNavigationServiceBound) {
+                bindService(
+                    serviceIntent,
+                    navigationServiceConnection,
+                    Context.BIND_AUTO_CREATE,
+                )
+            }
+            if (openMap) openGroupMap()
+        } catch (error: RuntimeException) {
+            Toast.makeText(
+                this,
+                error.localizedMessage ?: getString(R.string.navigation_service_start_failed),
+                Toast.LENGTH_LONG,
+            ).show()
         }
     }
 
@@ -346,13 +505,84 @@ class CommsRoomActivity : ComponentActivity(), CommsForegroundService.StateListe
 
     private fun showAudioUnavailableState() {
         isAudioReady = false
-        binding.connectionStatusText.text = getString(R.string.local_audio_not_ready)
         binding.micButton.isEnabled = false
         binding.pttModeButton.isEnabled = false
         binding.toggleModeButton.isEnabled = false
         binding.audioOutputButton.isEnabled = false
         binding.floatingPttCheckBox.isEnabled = false
         updateMicButton(false)
+        updateServiceControls()
+    }
+
+    private fun updateServiceControls() {
+        val voiceJoined = roomStatuses.containsKey(currentUid) || isAudioReady
+        val navigationJoined = navigationStatuses[currentUid]?.active == true ||
+            navigationService?.isNavigationActive == true
+        binding.joinVoiceButton.visibility =
+            if (voiceJoined) android.view.View.GONE else android.view.View.VISIBLE
+        binding.leaveVoiceButton.visibility =
+            if (voiceJoined) android.view.View.VISIBLE else android.view.View.GONE
+        binding.voiceControlsContainer.visibility =
+            if (voiceJoined) android.view.View.VISIBLE else android.view.View.GONE
+        binding.joinNavigationButton.visibility =
+            if (navigationJoined) android.view.View.GONE else android.view.View.VISIBLE
+        binding.openGroupMapButton.visibility =
+            if (navigationJoined) android.view.View.VISIBLE else android.view.View.GONE
+        binding.leaveNavigationButton.visibility =
+            if (navigationJoined) android.view.View.VISIBLE else android.view.View.GONE
+        if (!voiceJoined) {
+            binding.connectionStatusText.setText(R.string.voice_not_joined)
+        } else if (!isAudioReady) {
+            binding.connectionStatusText.setText(R.string.local_audio_starting)
+        }
+    }
+
+    private fun leaveVoice() {
+        commsService?.setStateListener(null)
+        commsService?.stopVoice()
+        if (isServiceBound) {
+            unbindService(serviceConnection)
+            isServiceBound = false
+        } else {
+            startService(
+                Intent(this, CommsForegroundService::class.java).apply {
+                    action = CommsForegroundService.ACTION_LEAVE_VOICE
+                },
+            )
+        }
+        commsService = null
+        isAudioReady = false
+        roomStatuses = roomStatuses - currentUid
+        renderMembers()
+        updateServiceControls()
+    }
+
+    private fun leaveNavigation() {
+        navigationService?.setStateListener(null)
+        navigationService?.stopNavigation()
+        if (isNavigationServiceBound) {
+            unbindService(navigationServiceConnection)
+            isNavigationServiceBound = false
+        } else {
+            startService(
+                Intent(this, NavigationForegroundService::class.java).apply {
+                    action = NavigationForegroundService.ACTION_LEAVE_NAVIGATION
+                },
+            )
+        }
+        navigationService = null
+        navigationStatuses = navigationStatuses - currentUid
+        renderMembers()
+        updateServiceControls()
+    }
+
+    private fun openGroupMap() {
+        startActivity(
+            Intent(this, GroupNavigationActivity::class.java).apply {
+                putExtra(RoomNavigation.EXTRA_ROOM_ID, roomId)
+                putExtra(RoomNavigation.EXTRA_ROOM_CODE, roomCode)
+            },
+        )
     }
 
     private fun hasAudioPermission(): Boolean = ContextCompat.checkSelfPermission(
@@ -374,8 +604,65 @@ class CommsRoomActivity : ComponentActivity(), CommsForegroundService.StateListe
                 )
             },
             onError = { error ->
-                Toast.makeText(this, error.localizedMessage, Toast.LENGTH_LONG).show()
+                if (!isLeavingRoom) {
+                    Toast.makeText(this, error.localizedMessage, Toast.LENGTH_LONG).show()
+                }
             },
+        )
+    }
+
+    private fun listenToServiceStatuses() {
+        if (voiceStatusListener == null) {
+            voiceStatusListener = signalingRepository.observeRoomStatuses(
+                roomId = roomId,
+                onStatusesChanged = { statuses ->
+                    roomStatuses = statuses
+                    renderMembers()
+                    updateServiceControls()
+                    if (statuses.containsKey(currentUid)) bindToRunningVoiceService()
+                },
+                onError = { error ->
+                    if (!isLeavingRoom) {
+                        Toast.makeText(this, error.localizedMessage, Toast.LENGTH_LONG).show()
+                    }
+                },
+            )
+        }
+        if (navigationStatusListener == null) {
+            navigationStatusListener = navigationRepository.observeNavigationStatuses(
+                roomId = roomId,
+                onStatusesChanged = { statuses ->
+                    navigationStatuses = statuses
+                    renderMembers()
+                    updateServiceControls()
+                    if (statuses[currentUid]?.active == true) {
+                        bindToRunningNavigationService()
+                    }
+                },
+                onError = { error ->
+                    if (!isLeavingRoom) {
+                        Toast.makeText(this, error.localizedMessage, Toast.LENGTH_LONG).show()
+                    }
+                },
+            )
+        }
+    }
+
+    private fun bindToRunningVoiceService() {
+        if (isServiceBound) return
+        isServiceBound = bindService(
+            Intent(this, CommsForegroundService::class.java),
+            serviceConnection,
+            0,
+        )
+    }
+
+    private fun bindToRunningNavigationService() {
+        if (isNavigationServiceBound) return
+        isNavigationServiceBound = bindService(
+            Intent(this, NavigationForegroundService::class.java),
+            navigationServiceConnection,
+            0,
         )
     }
 
@@ -383,7 +670,10 @@ class CommsRoomActivity : ComponentActivity(), CommsForegroundService.StateListe
         memberAdapter.submitList(
             roomMembers.map { member ->
                 val liveStatus = roomStatuses[member.uid]
+                val navigationStatus = navigationStatuses[member.uid]
                 member.copy(
+                    isVoiceJoined = liveStatus != null,
+                    isNavigating = navigationStatus?.active == true,
                     isConnected = liveStatus?.isConnected == true,
                     isSpeaking = liveStatus?.isSpeaking == true,
                     micMode = liveStatus?.micMode ?: member.micMode,
@@ -510,19 +800,51 @@ class CommsRoomActivity : ComponentActivity(), CommsForegroundService.StateListe
     }
 
     private fun leaveRoom() {
+        isLeavingRoom = true
+        memberListener?.remove()
+        memberListener = null
+        voiceStatusListener?.let {
+            signalingRepository.removeRoomStatusesListener(roomId, it)
+        }
+        voiceStatusListener = null
+        navigationStatusListener?.let {
+            navigationRepository.removeNavigationStatusesListener(roomId, it)
+        }
+        navigationStatusListener = null
         if (isServiceBound) {
-            commsService?.stopComms()
             commsService?.setStateListener(null)
+            commsService?.stopVoice()
             unbindService(serviceConnection)
             isServiceBound = false
             commsService = null
-        } else {
+        } else if (roomStatuses.containsKey(currentUid)) {
             startService(
                 Intent(this, CommsForegroundService::class.java).apply {
-                    action = CommsForegroundService.ACTION_LEAVE
+                    action = CommsForegroundService.ACTION_LEAVE_VOICE
                 },
             )
         }
-        finish()
+        if (isNavigationServiceBound) {
+            navigationService?.setStateListener(null)
+            navigationService?.stopNavigation()
+            unbindService(navigationServiceConnection)
+            isNavigationServiceBound = false
+            navigationService = null
+        } else if (navigationStatuses[currentUid]?.active == true) {
+            startService(
+                Intent(this, NavigationForegroundService::class.java).apply {
+                    action = NavigationForegroundService.ACTION_LEAVE_NAVIGATION
+                },
+            )
+        }
+        roomRepository.leaveRoom(roomId) { result ->
+            result.onSuccess { finish() }
+                .onFailure { error ->
+                    isLeavingRoom = false
+                    Toast.makeText(this, error.localizedMessage, Toast.LENGTH_LONG).show()
+                    listenToMembers()
+                    listenToServiceStatuses()
+                }
+        }
     }
 }

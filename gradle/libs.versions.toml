@@ -12,6 +12,7 @@ googleId = "1.2.0"
 googleServices = "4.5.0"
 lifecycle = "2.11.0"
 webrtc = "144.7559.12"
+mapLibre = "13.6.1"
 coreTelecom = "1.0.1"
 coroutines = "1.10.2"
 
@@ -31,6 +32,7 @@ androidx-lifecycle-runtime-ktx = { group = "androidx.lifecycle", name = "lifecyc
 androidx-core-telecom = { group = "androidx.core", name = "core-telecom", version.ref = "coreTelecom" }
 kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "coroutines" }
 webrtc-android = { group = "io.github.webrtc-sdk", name = "android", version.ref = "webrtc" }
+maplibre-android = { group = "org.maplibre.gl", name = "android-sdk-opengl", version.ref = "mapLibre" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 androidx-junit = { group = "androidx.test.ext", name = "junit", version.ref = "junitVersion" }
 androidx-espresso-core = { group = "androidx.test.espresso", name = "espresso-core", version.ref = "espressoCore" }

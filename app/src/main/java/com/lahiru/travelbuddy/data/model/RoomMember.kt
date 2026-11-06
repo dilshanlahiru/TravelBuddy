@@ -7,6 +7,8 @@ data class RoomMember(
     val displayName: String = "",
     val photoUrl: String? = null,
     val joinedAt: Timestamp? = null,
+    val isVoiceJoined: Boolean = false,
+    val isNavigating: Boolean = false,
     val isConnected: Boolean = false,
     val isSpeaking: Boolean = false,
     val micMode: String = MIC_MODE_PTT,

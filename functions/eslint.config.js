@@ -9,6 +9,9 @@ module.exports = [
         require: "readonly",
         exports: "readonly",
         module: "readonly",
+        console: "readonly",
+        __dirname: "readonly",
+        AbortSignal: "readonly",
       },
     },
     rules: {

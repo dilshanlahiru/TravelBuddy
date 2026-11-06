@@ -144,19 +144,22 @@ class SignalingRepository(
     fun registerRoomPresence(
         roomId: String,
         uid: String,
+        micMode: String,
         onComplete: (Result<Unit>) -> Unit,
     ) {
         val memberReference = database.reference.child(ROOM_STATUS_PATH)
             .child(roomId).child(MEMBERS_PATH).child(uid)
-        memberReference.onDisconnect().updateChildren(
-            mapOf(
-                "isConnected" to false,
-                "isSpeaking" to false,
-                "updatedAt" to ServerValue.TIMESTAMP,
-            ),
-        ) { error, _ ->
+        memberReference.onDisconnect().removeValue { error, _ ->
             if (error == null) {
-                onComplete(Result.success(Unit))
+                memberReference.setValue(
+                    mapOf(
+                        "isConnected" to false,
+                        "isSpeaking" to false,
+                        "micMode" to micMode,
+                        "updatedAt" to ServerValue.TIMESTAMP,
+                    ),
+                ).addOnSuccessListener { onComplete(Result.success(Unit)) }
+                    .addOnFailureListener { onComplete(Result.failure(it)) }
             } else {
                 onComplete(Result.failure(error.toException()))
             }
@@ -194,11 +197,16 @@ class SignalingRepository(
             .removeEventListener(listener)
     }
 
-    fun removeRoomStatus(roomId: String, uid: String) {
+    fun removeRoomStatus(
+        roomId: String,
+        uid: String,
+        onComplete: () -> Unit = {},
+    ) {
         val reference = database.reference.child(ROOM_STATUS_PATH)
             .child(roomId).child(MEMBERS_PATH).child(uid)
-        reference.onDisconnect().cancel()
-        reference.removeValue()
+        reference.onDisconnect().cancel { _, _ ->
+            reference.removeValue { _, _ -> onComplete() }
+        }
     }
 
     companion object {

@@ -21,7 +21,7 @@
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="@string/comms_room_title"
+                android:text="@string/room_lobby_title"
                 android:textAppearance="@android:style/TextAppearance.Material.Headline" />
 
             <TextView
@@ -29,7 +29,7 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="4dp"
-                android:text="@string/local_audio_not_ready" />
+                android:text="@string/voice_not_joined" />
 
         </LinearLayout>
 
@@ -57,12 +57,34 @@
     </LinearLayout>
 
     <Button
+        android:id="@+id/joinVoiceButton"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:text="@string/join_voice" />
+
+    <Button
+        android:id="@+id/leaveVoiceButton"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:text="@string/leave_voice"
+        android:visibility="gone" />
+
+    <Button
         android:id="@+id/permissionButton"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="12dp"
         android:text="@string/grant_permissions"
         android:visibility="gone" />
+
+    <LinearLayout
+        android:id="@+id/voiceControlsContainer"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:visibility="gone">
 
     <TextView
         android:layout_width="wrap_content"
@@ -132,6 +154,8 @@
         android:enabled="false"
         android:text="@string/floating_ptt_option" />
 
+    </LinearLayout>
+
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
@@ -162,10 +186,33 @@
         android:dividerHeight="1dp" />
 
     <Button
-        android:id="@+id/leaveRoomButton"
+        android:id="@+id/joinNavigationButton"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="12dp"
-        android:text="@string/leave_room" />
+        android:text="@string/join_navigation" />
+
+    <Button
+        android:id="@+id/openGroupMapButton"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:text="@string/open_group_map"
+        android:visibility="gone" />
+
+    <Button
+        android:id="@+id/leaveNavigationButton"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="6dp"
+        android:text="@string/leave_navigation"
+        android:visibility="gone" />
+
+    <Button
+        android:id="@+id/leaveRoomButton"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="6dp"
+        android:text="@string/leave_group" />
 
 </LinearLayout>

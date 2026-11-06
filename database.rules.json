@@ -2,18 +2,96 @@
   "rules": {
     ".read": false,
     ".write": false,
+    "room_access": {
+      "$roomId": {
+        ".read": "auth != null && data.child('members').child(auth.uid).val() == true",
+        ".write": false
+      }
+    },
     "signaling": {
       "$roomId": {
-        ".read": "auth != null",
-        ".write": "auth != null"
+        ".read": "auth != null && root.child('room_access').child($roomId).child('members').child(auth.uid).val() == true && root.child('room_status').child($roomId).child('members').child(auth.uid).exists()",
+        ".write": "auth != null && root.child('room_access').child($roomId).child('members').child(auth.uid).val() == true && root.child('room_status').child($roomId).child('members').child(auth.uid).exists()"
       }
     },
     "room_status": {
       "$roomId": {
         "members": {
-          ".read": "auth != null",
+          ".read": "auth != null && root.child('room_access').child($roomId).child('members').child(auth.uid).val() == true",
           "$uid": {
-            ".write": "auth != null && auth.uid == $uid"
+            ".write": "auth != null && auth.uid == $uid && root.child('room_access').child($roomId).child('members').child(auth.uid).val() == true",
+            ".validate": "!newData.exists() || newData.hasChildren(['isConnected', 'isSpeaking', 'micMode', 'updatedAt'])",
+            "isConnected": {
+              ".validate": "newData.isBoolean()"
+            },
+            "isSpeaking": {
+              ".validate": "newData.isBoolean()"
+            },
+            "micMode": {
+              ".validate": "newData.isString() && (newData.val() == 'PTT' || newData.val() == 'TOGGLE')"
+            },
+            "updatedAt": {
+              ".validate": "newData.isNumber()"
+            },
+            "$other": {
+              ".validate": false
+            }
+          }
+        }
+      }
+    },
+    "navigation_status": {
+      "$roomId": {
+        "members": {
+          ".read": "auth != null && root.child('room_access').child($roomId).child('members').child(auth.uid).val() == true",
+          "$uid": {
+            ".write": "auth != null && auth.uid == $uid && root.child('room_access').child($roomId).child('members').child(auth.uid).val() == true",
+            ".validate": "!newData.exists() || newData.hasChildren(['active', 'updatedAt'])",
+            "active": {
+              ".validate": "newData.isBoolean() && newData.val() == true"
+            },
+            "updatedAt": {
+              ".validate": "newData.isNumber() && newData.val() <= now + 10000"
+            },
+            "$other": {
+              ".validate": false
+            }
+          }
+        }
+      }
+    },
+    "group_trips": {
+      "$roomId": {
+        ".read": "auth != null && root.child('room_access').child($roomId).child('members').child(auth.uid).val() == true",
+        ".write": false,
+        "locations": {
+          "$uid": {
+            ".write": "auth != null && auth.uid == $uid && root.child('room_access').child($roomId).child('members').child(auth.uid).val() == true && (!newData.exists() || root.child('navigation_status').child($roomId).child('members').child(auth.uid).exists())",
+            ".validate": "!newData.exists() || newData.hasChildren(['latitude', 'longitude', 'accuracyMeters', 'speedMetersPerSecond', 'hasSpeed', 'bearingDegrees', 'updatedAt'])",
+            "latitude": {
+              ".validate": "newData.isNumber() && newData.val() >= -90 && newData.val() <= 90"
+            },
+            "longitude": {
+              ".validate": "newData.isNumber() && newData.val() >= -180 && newData.val() <= 180"
+            },
+            "accuracyMeters": {
+              ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() <= 5000"
+            },
+            "speedMetersPerSecond": {
+              ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() <= 150"
+            },
+            "hasSpeed": {
+              ".validate": "newData.isBoolean()"
+            },
+            "bearingDegrees": {
+              ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() < 360"
+            },
+            "updatedAt": {
+              ".validate": "newData.isNumber() && newData.val() <= now + 10000"
+            },
+            "$other": {
+              ".validate": false
+            }
           }
         }
       }

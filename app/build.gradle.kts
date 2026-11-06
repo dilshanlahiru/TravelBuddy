@@ -50,6 +50,7 @@ dependencies {
     implementation(libs.google.id)
 
     implementation(libs.webrtc.android)
+    implementation(libs.maplibre.android)
 
     implementation(libs.androidx.activity.ktx)
     implementation(libs.androidx.core.ktx)
